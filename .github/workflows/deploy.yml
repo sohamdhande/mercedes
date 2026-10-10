@@ -1,64 +1,18 @@
-name: Sync Upstream & Deploy
+name: Build and Deploy
 
 on:
   push:
     branches:
       - main
-  schedule:
-    - cron: '*/10 * * * *'
   workflow_dispatch:
-  repository_dispatch:
-    types: [upstream-updated]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  UPSTREAM_REPO: https://github.com/Injora/merc.git
 
 jobs:
-  sync:
-    name: Check & Sync Upstream
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      has_changes: ${{ steps.check_sync.outputs.has_changes }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Sync upstream
-        id: check_sync
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git remote add upstream "$UPSTREAM_REPO" || git remote set-url upstream "$UPSTREAM_REPO"
-          git fetch upstream main
-
-          COMMITS_BEHIND=$(git rev-list HEAD..upstream/main --count)
-          echo "Commits behind upstream: $COMMITS_BEHIND"
-
-          if [ "$COMMITS_BEHIND" -gt 0 ]; then
-            echo "Merging changes from $UPSTREAM_REPO..."
-            git merge upstream/main -m "chore: sync with upstream Injora/merc"
-            git push origin main
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Triggered by ${{ github.event_name }}, proceeding with build."
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No upstream changes. Skipping build."
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build-and-push:
     name: Build & Push Docker Image
-    needs: sync
-    if: needs.sync.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,7 +36,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=sha
+            type=raw,value=${{ github.sha }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -93,20 +47,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   deploy:
-    name: Deploy
+    name: Deploy to Kubernetes
     needs: build-and-push
-    runs-on: ubuntu-latest
-    env:
-      NST_TOKEN: ${{ secrets.NST_INIT_TOKEN }}
+    runs-on: self-hosted
     steps:
-      - name: Sync deployment on NST Init
+      - name: Set up Kubeconfig
         run: |
-          if [ -n "$NST_TOKEN" ]; then
-            echo "Syncing deployment with NST Init..."
-            curl -f -s -X POST https://init.nstsdc.org/api/apps \
-              -H "Authorization: Bearer $NST_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"appName":"overdrive","image":"ghcr.io/${{ github.repository }}:latest","port":80}'
-          else
-            echo "NST_INIT_TOKEN not set yet. Deployment image successfully updated in GHCR."
+          mkdir -p ~/.kube
+          if [ -n "${{ secrets.KUBE_CONFIG }}" ]; then
+            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+            chmod 600 ~/.kube/config
           fi
+
+      - name: Deploy image and wait for rollout
+        run: |
+          export KUBECONFIG=~/.kube/config
+          IMAGE_URI="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Updating deployment to image: $IMAGE_URI"
+          kubectl set image deployment/overdrive-mercedes web=$IMAGE_URI -n s-soham
+          kubectl rollout status deployment/overdrive-mercedes -n s-soham --timeout=120s
