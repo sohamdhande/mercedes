@@ -47,12 +47,17 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: build-and-push
-    if: ${{ secrets.NST_INIT_TOKEN != '' }}
+    env:
+      NST_TOKEN: ${{ secrets.NST_INIT_TOKEN }}
     steps:
       - name: Sync deployment on NST Init
         run: |
-          echo "Syncing deployment with NST Init..."
-          curl -f -s -X POST https://init.nstsdc.org/api/apps \
-            -H "Authorization: Bearer ${{ secrets.NST_INIT_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"appName":"overdrive","image":"ghcr.io/${{ github.repository }}:latest","port":80}'
+          if [ -n "$NST_TOKEN" ]; then
+            echo "Syncing deployment with NST Init..."
+            curl -f -s -X POST https://init.nstsdc.org/api/apps \
+              -H "Authorization: Bearer $NST_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"appName":"overdrive","image":"ghcr.io/${{ github.repository }}:latest","port":80}'
+          else
+            echo "NST_INIT_TOKEN not set yet. Deployment image successfully updated in GHCR."
+          fi
