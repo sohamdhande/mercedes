@@ -1,29 +1,58 @@
-name: Deploy to Server
+name: Build and Deploy
 
 on:
   push:
     branches:
       - main
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  deploy:
-    runs-on: self-hosted
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      - name: Deploy app
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: ${{ secrets.NST_INIT_TOKEN != '' }}
+    steps:
+      - name: Sync deployment on NST Init
         run: |
-          cd /home/soham
-          if [ ! -d "mercedes" ]; then
-            git clone https://github.com/sohamdhande/mercedes.git
-          fi
-          cd mercedes
-          git fetch --all
-          git reset --hard origin/main
-          
-          # Install dependencies and build
-          npm install
-          npm run build
-          
-          # Restart or start the app with PM2 on port 3050
-          pm2 delete overdrive || true
-          pm2 serve dist 3050 --name "overdrive" --spa
-          pm2 save
+          echo "Syncing deployment with NST Init..."
+          curl -f -s -X POST https://init.nstsdc.org/api/apps \
+            -H "Authorization: Bearer ${{ secrets.NST_INIT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"appName":"overdrive","image":"ghcr.io/${{ github.repository }}:latest","port":80}'
