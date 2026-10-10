@@ -1,16 +1,64 @@
-name: Build and Deploy
+name: Sync Upstream & Deploy
 
 on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [upstream-updated]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  UPSTREAM_REPO: https://github.com/Injora/merc.git
 
 jobs:
+  sync:
+    name: Check & Sync Upstream
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      has_changes: ${{ steps.check_sync.outputs.has_changes }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream
+        id: check_sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_REPO" || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch upstream main
+
+          COMMITS_BEHIND=$(git rev-list HEAD..upstream/main --count)
+          echo "Commits behind upstream: $COMMITS_BEHIND"
+
+          if [ "$COMMITS_BEHIND" -gt 0 ]; then
+            echo "Merging changes from $UPSTREAM_REPO..."
+            git merge upstream/main -m "chore: sync with upstream Injora/merc"
+            git push origin main
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Triggered by ${{ github.event_name }}, proceeding with build."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No upstream changes. Skipping build."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-push:
+    name: Build & Push Docker Image
+    needs: sync
+    if: needs.sync.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,8 +93,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   deploy:
-    runs-on: ubuntu-latest
+    name: Deploy
     needs: build-and-push
+    runs-on: ubuntu-latest
     env:
       NST_TOKEN: ${{ secrets.NST_INIT_TOKEN }}
     steps:
